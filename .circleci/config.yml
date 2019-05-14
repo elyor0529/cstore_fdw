@@ -1,0 +1,66 @@
+version: 2.1
+
+jobs:
+  build:
+    docker:
+      - {image: 'citusdata/extbuilder:debug'}
+    shell: /bin/bash -euxo pipefail
+    environment:
+      IFS: $'\n\t'
+    steps:
+      - run:
+          name: 'Create workspace'
+          command: |
+            mkdir -p ./workspace/install "${HOME}/build"
+      - {checkout: {path: './workspace/src'}}
+      - run:
+          name: 'Build'
+          command: |
+            pushd ./workspace/src
+            mkdir ./debian
+            echo '10
+            11' > ./debian/pgversions
+
+            export CFLAGS='-Werror -ggdb -Og'
+            makeflags="-j$(nproc)"
+
+            pg_buildext -m "${makeflags}" install "${HOME}/build/pgsql-%v" pgsql-%v
+            popd
+
+            mv ./workspace/src/debian/pgsql-* ./workspace/install
+            rm -rf .workspace/src/.git .workspace/src/debian
+      - {persist_to_workspace: {root: './workspace', paths: [.]}}
+  test:
+    docker:
+      - {image: 'citusdata/exttester-10:reporting'}
+    working_directory: /home/circleci/project
+    shell: /bin/bash -euxo pipefail
+    environment:
+      IFS: $'\n\t'
+    steps:
+      - {attach_workspace: {at: ./workspace}}
+      - run:
+          name: 'Install extension'
+          command: |
+            apt-get update && apt-get install libprotobuf-c1
+            cp -R ./workspace/install/pgsql-${PG_MAJOR}/* /
+            chown -R circleci:circleci /home/circleci
+      - run:
+          name: 'Run tests'
+          shell: /usr/local/bin/gosu circleci /bin/bash -euxo pipefail
+          command: |
+            ulimit -c unlimited
+            export PG_CONFIG="/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config"
+            echo 'shared_preload_libraries=cstore_fdw' > /tmp/postgres-extra.conf
+            export REGRESS_OPTS="--temp-instance=${HOME}/tmp_check --temp-config=/tmp/postgres-extra.conf"
+            pushd ./workspace/src
+            status=0
+            make installcheck || status=$?
+            exit $status
+
+workflows:
+  version: 2
+  build_and_test:
+    jobs:
+      - build
+      - {test: {requires: [build]}}
